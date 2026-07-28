@@ -47,19 +47,6 @@ function timeAgo(iso) {
   const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
   if (mins < 1) return "just now";
   if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.round(mins / 6}
-
-function fireBrowserNotification(title, body) {
-  try {
-    if (typeof Notification === "undefined") return;
-    if (Notification.permission === "granted") new Notification(title, { body });
-  } catch (e) { /* notifications not available */ }
-}
-
-function timeAgo(iso) {
-  const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
-  if (mins < 1) return "just now";
-  if (mins < 60) return `${mins}m ago`;
   const hrs = Math.round(mins / 60);
   if (hrs < 24) return `${hrs}h ago`;
   return `${Math.round(hrs / 24)}d ago`;
@@ -244,17 +231,20 @@ export default function ShipmentApp() {
         if (alias) {
           customerId = alias.customer_id;
         } else {
-          // 2. existing canonical customer with this exact name?
-          const { data: existingCust } = await supabase.from("customers").select("id").eq("canonical_name", cneeRaw).maybeSingle();
-          if (existingCust) {
-            customerId = existingCust.id;
-          } else {
-            const { data: newCust, error: custErr } = await supabase.from("customers").insert({ canonical_name: cneeRaw }).select("id").single();
-            if (custErr) { setError(custErr.message); continue; }
-            customerId = newCust.id;
-            newCustomers++;
-          }
-          await supabase.from("customer_name_aliases").insert({ raw_name: cneeRaw, customer_id: customerId }).select();
+          // 2. Upsert by canonical_name instead of select-then-insert — avoids a
+          // race/duplicate-key error when the same name shows up more than once
+          // (either across rows in this file, or against an already-imported name).
+          const { data: custRow, error: custErr } = await supabase
+            .from("customers")
+            .upsert({ canonical_name: cneeRaw }, { onConflict: "canonical_name" })
+            .select("id")
+            .single();
+          if (custErr) { setError(custErr.message); continue; }
+          customerId = custRow.id;
+          newCustomers++;
+          await supabase
+            .from("customer_name_aliases")
+            .upsert({ raw_name: cneeRaw, customer_id: customerId }, { onConflict: "raw_name" });
         }
         customerIdCache[key] = customerId;
       }
@@ -765,4 +755,4 @@ function Modal({ children, onClose }) {
       </div>
     </div>
   );
-}
+      }
