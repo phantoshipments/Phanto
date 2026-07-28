@@ -215,6 +215,7 @@ export default function ShipmentApp() {
     const existingShipmentNos = new Set(shipments.map((s) => s.shipment_no));
     const toInsertShipments = [];
     const customerIdCache = {}; // normalizedKey -> customer_id, for this run
+    const assignedPairsThisRun = new Set(); // "customerId:coordinatorId" already handled this run
 
     for (const row of rows) {
       const shipmentNo = row["Shipment No."] || row["Shipment No"];
@@ -247,6 +248,27 @@ export default function ShipmentApp() {
             .upsert({ raw_name: cneeRaw, customer_id: customerId }, { onConflict: "raw_name" });
         }
         customerIdCache[key] = customerId;
+      }
+
+      // 3. Optional auto-assignment: if the sheet has a "Coordinator" column and it
+      // names someone who exists in the coordinators table, assign that customer to
+      // them automatically instead of leaving it unassigned. Safe to re-run — it
+      // skips pairs already assigned (checked once per run via assignedPairsThisRun,
+      // and again in the DB via ignoreDuplicates, so no duplicate rows or repeat
+      // "New customer assigned" notifications on re-import).
+      const coordName = (row["Coordinator"] || row["Coordinator Name"] || row["Assigned To"] || "").toString().trim();
+      if (coordName && customerId) {
+        const match = coordinators.find((c) => c.name.toLowerCase() === coordName.toLowerCase());
+        if (match) {
+          const pairKey = `${customerId}:${match.id}`;
+          if (!assignedPairsThisRun.has(pairKey)) {
+            assignedPairsThisRun.add(pairKey);
+            await supabase.from("customer_coordinators").upsert(
+              { customer_id: customerId, coordinator_id: match.id, assigned_by: me.id },
+              { onConflict: "customer_id,coordinator_id", ignoreDuplicates: true }
+            );
+          }
+        }
       }
 
       toInsertShipments.push({
@@ -755,4 +777,4 @@ function Modal({ children, onClose }) {
       </div>
     </div>
   );
-      }
+                                                                        }
