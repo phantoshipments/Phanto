@@ -33,8 +33,22 @@ function statusFor(daysLeft, delivered, acknowledged) {
   if (daysLeft < 0) return { key: "overdue", label: `${Math.abs(daysLeft)}d overdue`, tone: "overdue" };
   if (daysLeft <= 5) return { key: "critical", label: `${daysLeft}d left`, tone: acknowledged ? "acked" : "critical" };
   if (daysLeft <= 10) return { key: "warning", label: `${daysLeft}d left`, tone: acknowledged ? "acked" : "warning" };
+  if (daysLeft <= 15) return { key: "upcoming", label: `${daysLeft}d left`, tone: acknowledged ? "acked" : "upcoming" };
   return { key: "ok", label: `${daysLeft}d left`, tone: "ok" };
 }
+
+// Hardcoded customer -> coordinator assignments. Fill these in with real
+// pairs — matching is case/whitespace-insensitive (goes through the same
+// normalizeKey() used to merge duplicate spellings of a customer name), so
+// "AL YOUSUF ELECTRONICS LLC" and "Al Yousuf Electronics LLC " both match one
+// entry. Every import checks this table FIRST, before any Coordinator/PIC
+// column in the sheet. Anyone not listed here still always gets assigned —
+// it just falls back to whoever is running the import instead of a specific
+// pinned person.
+const CUSTOMER_COORDINATOR_MAP = {
+  // "AL YOUSUF ELECTRONICS LLC": "Rahma",
+  // "SOME OTHER CUSTOMER": "Donia",
+};
 
 function fireBrowserNotification(title, body) {
   try {
@@ -250,24 +264,24 @@ export default function ShipmentApp() {
         customerIdCache[key] = customerId;
       }
 
-      // 3. Optional auto-assignment: if the sheet has a "Coordinator" column and it
-      // names someone who exists in the coordinators table, assign that customer to
-      // them automatically instead of leaving it unassigned. Safe to re-run — it
-      // skips pairs already assigned (checked once per run via assignedPairsThisRun,
-      // and again in the DB via ignoreDuplicates, so no duplicate rows or repeat
-      // "New customer assigned" notifications on re-import).
-      const coordName = (row["Coordinator"] || row["Coordinator Name"] || row["Assigned To"] || "").toString().trim();
-      if (coordName && customerId) {
-        const match = coordinators.find((c) => c.name.toLowerCase() === coordName.toLowerCase());
-        if (match) {
-          const pairKey = `${customerId}:${match.id}`;
-          if (!assignedPairsThisRun.has(pairKey)) {
-            assignedPairsThisRun.add(pairKey);
-            await supabase.from("customer_coordinators").upsert(
-              { customer_id: customerId, coordinator_id: match.id, assigned_by: me.id },
-              { onConflict: "customer_id,coordinator_id", ignoreDuplicates: true }
-            );
-          }
+      // 3. Coordinator assignment — ALWAYS resolves to someone, never left "Unassigned".
+      // Priority: hardcoded CUSTOMER_COORDINATOR_MAP first, then any Coordinator/PIC
+      // column in the sheet, then fall back to whoever is running the import.
+      const coordName = (row["Coordinator"] || row["PIC"] || row["Coordinator Name"] || row["Assigned To"] || "").toString().trim();
+      const match = coordName ? coordinators.find((c) => c.name.toLowerCase() === coordName.toLowerCase()) : null;
+      const hardcodedEntry = Object.entries(CUSTOMER_COORDINATOR_MAP).find(([mapKey]) => normalizeKey(mapKey) === key);
+      const hardcodedName = hardcodedEntry ? hardcodedEntry[1] : null;
+      const hardcodedMatch = hardcodedName ? coordinators.find((c) => c.name.toLowerCase() === hardcodedName.toLowerCase()) : null;
+      const fallback = coordinators.find((c) => c.id === me.id) || null;
+      const assignTo = hardcodedMatch || match || fallback;
+      if (assignTo && customerId) {
+        const pairKey = `${customerId}:${assignTo.id}`;
+        if (!assignedPairsThisRun.has(pairKey)) {
+          assignedPairsThisRun.add(pairKey);
+          await supabase.from("customer_coordinators").upsert(
+            { customer_id: customerId, coordinator_id: assignTo.id, assigned_by: me.id },
+            { onConflict: "customer_id,coordinator_id", ignoreDuplicates: true }
+          );
         }
       }
 
@@ -289,6 +303,7 @@ export default function ShipmentApp() {
         do_shared_date: excelDateToISO(row["Do shared date"]),
         invoice_status: row["Invoice status"] || "",
         remark: row["Remark"] || "",
+        raw_details: row, // full original row, every column, nothing lost — viewable per shipment
       });
       existingShipmentNos.add(String(shipmentNo));
       added++;
@@ -353,17 +368,18 @@ export default function ShipmentApp() {
       : grouped;
     const list = [];
     allGrouped.forEach((g) => g.shipments.forEach((s) => {
-      if (!s.delivered && !s.reminder_acknowledged && s.daysLeft !== null && s.daysLeft <= 10) list.push({ ...s, customerName: g.customer.canonicalName });
+      if (!s.delivered && !s.reminder_acknowledged && s.daysLeft !== null && s.daysLeft <= 15) list.push({ ...s, customerName: g.customer.canonicalName });
     }));
     return list;
   }, [grouped, isAdmin, shipments, customers, today]);
 
   useEffect(() => { if (loaded && atRisk.length > 0 && !dismissedThisSession) setShowAlert(true); }, [loaded, atRisk.length, dismissedThisSession]);
 
-  // Note: the actual "DO not made, <=10 days left" notifications are generated
-  // server-side by generate_do_reminders() on a daily pg_cron schedule (see
-  // schema-migration-v5.sql) — nothing to do here client-side except display
-  // them, which the Realtime subscription above already handles.
+  // Note: the actual "DO not made" notifications (15-day heads-up + 5-10 day
+  // urgent tiers) are generated server-side by generate_do_reminders() on a
+  // daily pg_cron schedule (see schema-migration-v8.sql) — nothing to do here
+  // client-side except display them, which the Realtime subscription above
+  // already handles.
 
   // ---- mutations ----
   function toggleExpand(key) { setExpanded((p) => ({ ...p, [key]: !p[key] })); }
@@ -509,7 +525,7 @@ export default function ShipmentApp() {
             </button>
           )}
           <div style={{ position: "relative" }}>
-            <button className="btn" onClick={() => setShowNotifPanel((v) => !v)} style={{ display: "flex", alignItems: "center", gap: 6, background: myUnreadCount > 0 ? "#FEF2F2" : "#fff", color: myUnreadCount > 0 ? "#DC2626" : "#374151", padding: "8px 12px", borderRadius: 7, fontSize: 12, fontWeight: 700, border: `1px solid ${myUnreadCount > 0 ? "#FCA5A5" : "#E5E7EB"}` }}>
+            <button className="btn" onClick={() => setShowNotifPanel((v) => !v)} style={{ display: "flex", alignItems: "center", gap: 6, background: myUnreadCount > 0 ? "#FEF2F2" : "#fff", color: myUnreadCount > 0 ? "#DC2626" : "#374151", padding: "8px 12px", borderRadius: 7, fontSize: 12, fontWeight: 700, border: `1px solid ${myUnreadCount > 0  ? "#FCA5A5" : "#E5E7EB"}` }}>
               <Bell size={14} /> {myUnreadCount > 0 ? myUnreadCount : ""}
             </button>
             {showNotifPanel && <NotificationPanel notifications={notifications} onClose={() => setShowNotifPanel(false)} onMarkRead={markNotificationRead} onMarkAllRead={markAllNotificationsRead} />}
@@ -631,7 +647,7 @@ function CustomerGroup({ group, expanded, templatesOpenState, onToggle, onToggle
   const { customer, shipments } = group;
   const templates = customer.templates || [];
   const assignedNames = coordinators.filter((c) => (customer.coordinators || []).includes(c.id)).map((c) => c.name);
-  const atRiskCount = shipments.filter((s) => !s.delivered && !s.reminder_acknowledged && s.daysLeft !== null && s.daysLeft <= 10).length;
+  const atRiskCount = shipments.filter((s) => !s.delivered && !s.reminder_acknowledged && s.daysLeft !== null && s.daysLeft <= 15).length;
 
   return (
     <div style={{ border: "1px solid #E5E7EB", borderRadius: 10, background: "#fff", overflow: "hidden" }}>
@@ -750,6 +766,10 @@ function NotificationPanel({ notifications, onClose, onMarkRead, onMarkAllRead }
 
 function EditShipmentModal({ shipment, onSave, onClose }) {
   const [form, setForm] = useState({ ...shipment });
+  const [showAllDetails, setShowAllDetails] = useState(false);
+  const rawEntries = shipment.raw_details
+    ? Object.entries(shipment.raw_details).filter(([, v]) => v !== null && v !== undefined && v !== "")
+    : [];
   return (
     <Modal onClose={onClose}>
       <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 14, color: "#111827" }}>Edit shipment {shipment.shipment_no}</div>
@@ -759,12 +779,30 @@ function EditShipmentModal({ shipment, onSave, onClose }) {
         <textarea value={form.remark || ""} onChange={(e) => setForm({ ...form, remark: e.target.value })} rows={3} placeholder="Remark" style={{ width: "100%", resize: "vertical" }} />
         <button className="btn" onClick={() => onSave(form)} style={{ background: "#DC2626", color: "#fff", padding: "10px", borderRadius: 7, fontWeight: 600, fontSize: 13 }}>Save changes</button>
       </div>
+      {rawEntries.length > 0 && (
+        <div style={{ marginTop: 16, borderTop: "1px solid #E5E7EB", paddingTop: 12 }}>
+          <button className="btn" onClick={() => setShowAllDetails((v) => !v)} style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", color: "#6B7280", fontSize: 12, fontWeight: 600 }}>
+            {showAllDetails ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+            All details from the master file ({rawEntries.length})
+          </button>
+          {showAllDetails && (
+            <div style={{ marginTop: 8, maxHeight: 260, overflowY: "auto", background: "#FAFAFA", border: "1px solid #E5E7EB", borderRadius: 8, padding: 10 }}>
+              {rawEntries.map(([k, v]) => (
+                <div key={k} style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 11.5, padding: "3px 0", borderBottom: "1px solid #F3F4F6" }}>
+                  <span style={{ color: "#9CA3AF", flexShrink: 0 }}>{k}</span>
+                  <span style={{ color: "#374151", textAlign: "right" }}>{String(v)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </Modal>
   );
 }
 
 function StatusBadge({ status }) {
-  const map = { ok: { bg: "#F0FDF4", fg: "#15803D" }, warning: { bg: "#FFFBEB", fg: "#B45309" }, critical: { bg: "#FEF2F2", fg: "#DC2626" }, overdue: { bg: "#FEE2E2", fg: "#991B1B" }, delivered: { bg: "#F3F4F6", fg: "#6B7280" }, acked: { bg: "#F3F4F6", fg: "#9CA3AF" }, unknown: { bg: "#F3F4F6", fg: "#9CA3AF" } };
+  const map = { ok: { bg: "#F0FDF4", fg: "#15803D" }, upcoming: { bg: "#EFF6FF", fg: "#2563EB" }, warning: { bg: "#FFFBEB", fg: "#B45309" }, critical: { bg: "#FEF2F2", fg: "#DC2626" }, overdue: { bg: "#FEE2E2", fg: "#991B1B" }, delivered: { bg: "#F3F4F6", fg: "#6B7280" }, acked: { bg: "#F3F4F6", fg: "#9CA3AF" }, unknown: { bg: "#F3F4F6", fg: "#9CA3AF" } };
   const c = map[status.tone] || map.unknown;
   return <span style={{ background: c.bg, color: c.fg, padding: "3px 8px", borderRadius: 5, fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>{status.label}</span>;
 }
@@ -777,4 +815,4 @@ function Modal({ children, onClose }) {
       </div>
     </div>
   );
-                                                                        }
+                     }
