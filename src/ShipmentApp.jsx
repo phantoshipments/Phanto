@@ -269,7 +269,7 @@ export default function ShipmentApp() {
       // column in the sheet, then fall back to whoever is running the import.
       const coordName = (row["Coordinator"] || row["PIC"] || row["Coordinator Name"] || row["Assigned To"] || "").toString().trim();
       const match = coordName ? coordinators.find((c) => c.name.toLowerCase() === coordName.toLowerCase()) : null;
-      const hardcodedEntry = Object.entries(CUSTOMER_COORDINATOR_MAP).find(([mapKey]) => normalizeKey(mapKey) === key);
+      const hardcodedEntry = Object.entries(CUSTOMER_COORDINATOR_MAP).find(([mapKey]) => key.includes(normalizeKey(mapKey)));
       const hardcodedName = hardcodedEntry ? hardcodedEntry[1] : null;
       const hardcodedMatch = hardcodedName ? coordinators.find((c) => c.name.toLowerCase() === hardcodedName.toLowerCase()) : null;
       const fallback = coordinators.find((c) => c.id === me.id) || null;
