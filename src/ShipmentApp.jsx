@@ -46,8 +46,8 @@ function statusFor(daysLeft, delivered, acknowledged) {
 // it just falls back to whoever is running the import instead of a specific
 // pinned person.
 const CUSTOMER_COORDINATOR_MAP = {
-  // "AL YOUSUF ELECTRONICS LLC": "Rahma",
-  // "SOME OTHER CUSTOMER": "Donia",
+  "AL YOUSUF ELECTRONICS LLC": "Rahma",
+  "LG ELECTRONICS IN": "Saron Solomo",
 };
 
 function fireBrowserNotification(title, body) {
