@@ -376,15 +376,25 @@ export default function ShipmentApp() {
 
   useEffect(() => { if (loaded && atRisk.length > 0 && !dismissedThisSession) setShowAlert(true); }, [loaded, atRisk.length, dismissedThisSession]);
 
+  // Note: the actual "DO not made" notifications (15-day heads-up + 5-10 day
+  // urgent tiers) are generated server-side by generate_do_reminders() on a
+  // daily pg_cron schedule (see schema-migration-v8.sql) — nothing to do here
+  // client-side except display them, which the Realtime subscription above
+  // already handles.
+
+  // ---- mutations ----
+  function toggleExpand(key) { setExpanded((p) => ({ ...p, [key]: !p[key] })); }
+  function toggleTemplates(key) { setTemplatesOpen((p) => ({ ...p, [key]: !p[key] })); }
+
   async function updateCustomerEmail(customerId, email) {
     setCustomers((p) => ({ ...p, [customerId]: { ...p[customerId], email } }));
     const { error } = await supabase.from("customers").update({ email }).eq("id", customerId);
     if (error) setError(error.message);
   }
 
-  function toggleExpand(key) { setExpanded((p) => ({ ...p, [key]: !p[key] })); }
-  function toggleTemplates(key) { setTemplatesOpen((p) => ({ ...p, [key]: !p[key] })); }
-
+  // Admin toggles a coordinator on/off a customer. Adding one is a plain
+  // insert into customer_coordinators — the DB trigger fires the
+  // "New customer assigned" notification automatically.
   async function toggleCoordinatorAssignment(customerId, coordinatorId) {
     const c = customers[customerId];
     const isAssigned = (c.coordinators || []).includes(coordinatorId);
@@ -474,6 +484,7 @@ export default function ShipmentApp() {
   const myAssignedCount = me ? Object.values(customers).filter((c) => (c.coordinators || []).includes(me.id)).length : 0;
   const myUnreadCount = notifications.filter((n) => !n.is_read).length;
 
+  // ---- gates ----
   if (session === undefined) return <div style={{ padding: 40, textAlign: "center", color: "#9CA3AF" }}>Loading…</div>;
   if (!session) return <LoginScreen onLoggedIn={() => {}} />;
   if (meMissing) {
@@ -700,63 +711,54 @@ function CustomerGroup({ group, expanded, templatesOpenState, onToggle, onToggle
           </div>
           <div style={{ overflowX: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead><tr>{["", "Shipment No.", "Arrival", "Carrier", "Status", ""].map((h) => <th key={h} style={{ textAlign: "left", fontSize: 10.5, color: "#9CA3AF", padding: "8px 12px", borderBottom: "1px solid #E5E7EB", whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
+              <thead>
+                <tr>
+                  {["HBL No.", "Shipment No.", "Onb. Date", "Arrival", "POL", "POD", "Vessel", "Shipper", "Carrier", "Incoterms", "Gross Weight", "CBM", "20FT", "40FT", "Cargo Type", "ETD", "ETA", "Status", "3P Letter", ""].map((h) => (
+                    <th key={h} style={{ textAlign: "left", fontSize: 10.5, color: "#9CA3AF", padding: "8px 12px", borderBottom: "1px solid #E5E7EB", whiteSpace: "nowrap" }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
               <tbody>
-                {shipments.map((s) => (
-                  <ShipmentRow key={s.id} s={s} onToggleAck={onToggleAck} onEdit={onEdit} onRemove={onRemove} />
-                ))}
+                {shipments.map((s) => {
+                  const rd = s.raw_details || {};
+                  const cellStyle = { padding: "9px 12px", fontSize: 12.5, borderBottom: "1px solid #F3F4F6" };
+                  return (
+                    <tr key={s.id}>
+                      <td style={cellStyle}>{s.hbl_no || "—"}</td>
+                      <td style={cellStyle}>{s.shipment_no}</td>
+                      <td style={cellStyle}>{s.on_board_date || "—"}</td>
+                      <td style={cellStyle}>{s.arrival_date || "—"}</td>
+                      <td style={cellStyle}>{s.pol || "—"}</td>
+                      <td style={cellStyle}>{s.pod || "—"}</td>
+                      <td style={{ ...cellStyle, maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.vessel || "—"}</td>
+                      <td style={{ ...cellStyle, maxWidth: 150, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.shpr_name}</td>
+                      <td style={{ ...cellStyle, maxWidth: 130, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.carrier_name}</td>
+                      <td style={cellStyle}>{rd["Incoterms"] || "—"}</td>
+                      <td style={cellStyle}>{rd["Gross Weight"] || "—"}</td>
+                      <td style={cellStyle}>{rd["CBM"] || "—"}</td>
+                      <td style={cellStyle}>{rd["20FT"] ?? "—"}</td>
+                      <td style={cellStyle}>{rd["40FT"] ?? "—"}</td>
+                      <td style={cellStyle}>{rd["Cargo Type"] || "—"}</td>
+                      <td style={cellStyle}>{rd["ETD"] || "—"}</td>
+                      <td style={cellStyle}>{rd["ETA"] || "—"}</td>
+                      <td style={cellStyle}><StatusBadge status={s.status} /></td>
+                      <td style={{ ...cellStyle, color: "#6B7280" }}>{s.do_status_3p || "—"}</td>
+                      <td style={cellStyle}>
+                        <div style={{ display: "flex", gap: 5 }}>
+                          <button className="btn" onClick={() => onToggleAck(s.id)} style={{ background: s.reminder_acknowledged ? "#F0FDF4" : "#F3F4F6", color: s.reminder_acknowledged ? "#15803D" : "#6B7280", padding: "5px 8px", borderRadius: 6, fontSize: 10.5, fontWeight: 600, whiteSpace: "nowrap" }}>{s.reminder_acknowledged ? "✓ DO Made" : "DO Made"}</button>
+                          <button className="btn" onClick={() => onEdit(s)} style={{ background: "transparent", color: "#9CA3AF", padding: 5, fontSize: 10.5 }}>Edit</button>
+                          {onRemove && <button className="btn" onClick={() => onRemove(s.id)} style={{ background: "transparent", color: "#9CA3AF", padding: 5 }}><Trash2 size={12} /></button>}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
         </div>
       )}
     </div>
-  );
-}
-
-function ShipmentRow({ s, onToggleAck, onEdit, onRemove }) {
-  const [open, setOpen] = useState(false);
-  const alreadyShown = new Set([
-    "Shipment No.", "HBL No.", "MBL No.", "MBL No", "Onb. Date", "ARR Date",
-    "SHPR Name", "CNEE  Name", "CNEE Name", "Carrier Name", "3P Letter ", "3P Letter",
-    "Do Status", "Do shared date", "Invoice status", "Remark",
-  ]);
-  const extraEntries = s.raw_details
-    ? Object.entries(s.raw_details).filter(([k, v]) => !alreadyShown.has(k) && v !== null && v !== undefined && v !== "")
-    : [];
-  return (
-    <>
-      <tr onClick={() => setOpen((v) => !v)} style={{ cursor: "pointer" }}>
-        <td style={{ padding: "9px 12px", fontSize: 12.5, borderBottom: "1px solid #F3F4F6", width: 24 }}>{open ? <ChevronDown size={13} color="#9CA3AF" /> : <ChevronRight size={13} color="#9CA3AF" />}</td>
-        <td style={{ padding: "9px 12px", fontSize: 12.5, borderBottom: "1px solid #F3F4F6" }}>{s.shipment_no}</td>
-        <td style={{ padding: "9px 12px", fontSize: 12.5, borderBottom: "1px solid #F3F4F6" }}>{s.arrival_date || "—"}</td>
-        <td style={{ padding: "9px 12px", fontSize: 12.5, borderBottom: "1px solid #F3F4F6", maxWidth: 130, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.carrier_name}</td>
-        <td style={{ padding: "9px 12px", fontSize: 12.5, borderBottom: "1px solid #F3F4F6" }}><StatusBadge status={s.status} /></td>
-        <td style={{ padding: "9px 12px", fontSize: 12.5, borderBottom: "1px solid #F3F4F6" }} onClick={(e) => e.stopPropagation()}>
-          <div style={{ display: "flex", gap: 5 }}>
-            <button className="btn" onClick={() => onToggleAck(s.id)} style={{ background: s.reminder_acknowledged ? "#F0FDF4" : "#F3F4F6", color: s.reminder_acknowledged ? "#15803D" : "#6B7280", padding: "5px 8px", borderRadius: 6, fontSize: 10.5, fontWeight: 600, whiteSpace: "nowrap" }}>{s.reminder_acknowledged ? "✓ DO Made" : "DO Made"}</button>
-            <button className="btn" onClick={() => onEdit(s)} style={{ background: "transparent", color: "#9CA3AF", padding: 5, fontSize: 10.5 }}>Edit</button>
-            {onRemove && <button className="btn" onClick={() => onRemove(s.id)} style={{ background: "transparent", color: "#9CA3AF", padding: 5 }}><Trash2 size={12} /></button>}
-          </div>
-        </td>
-      </tr>
-      {open && (
-        <tr>
-          <td colSpan={6} style={{ padding: "10px 14px 14px 34px", background: "#FAFAFA", borderBottom: "1px solid #F3F4F6" }}>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: "6px 16px" }}>
-              {extraEntries.length === 0 ? (
-                <div style={{ fontSize: 11.5, color: "#9CA3AF" }}>No extra details on this shipment.</div>
-              ) : extraEntries.map(([k, v]) => (
-                <div key={k} style={{ fontSize: 11 }}>
-                  <div style={{ color: "#9CA3AF", fontSize: 10 }}>{k.trim()}</div>
-                  <div style={{ color: "#374151", fontWeight: 500 }}>{String(v)}</div>
-                </div>
-              ))}
-            </div>
-          </td>
-        </tr>
-      )}
-    </>
   );
 }
 
@@ -839,4 +841,4 @@ function Modal({ children, onClose }) {
       </div>
     </div>
   );
-          }
+                            }
