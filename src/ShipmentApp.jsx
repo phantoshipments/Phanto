@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
 import * as XLSX from "xlsx";
-import { Upload, ChevronDown, ChevronRight, Mail, Bell, BellRing, Check, CheckCheck, Users, UserPlus, AlertTriangle, Trash2, Plus, ShieldCheck, FileDown, LogOut } from "lucide-react";
+import { Upload, ChevronDown, ChevronRight, Mail, Bell, BellRing, Check, CheckCheck, Users, UserPlus, AlertTriangle, Trash2, Plus, ShieldCheck, FileDown, LogOut, ExternalLink } from "lucide-react";
 import { supabase } from "./supabaseClient";
 import { subscribeToPush } from "./pushSubscribe";
 
@@ -17,6 +17,77 @@ const daysBetween = (fromISO, toISO) => {
 function normalizeKey(raw) {
   if (!raw) return "";
   return raw.toString().toUpperCase().replace(/P\.?\s?O\.?\s?BOX.*$/i, "").replace(/[().,]/g, "").replace(/\s+/g, " ").trim();
+}
+
+// Carrier tracking links. Only the biggest global carriers get a direct deep
+// link (patterns confirmed against each carrier's public tracking page as of
+// early 2026 — these do occasionally change, so if one stops working, swap
+// in the carrier's current tracking URL). Everything else — regional agents,
+// smaller lines, anything not recognized — falls back to a Google search,
+// which reliably surfaces the right tracking page anyway.
+function getTrackingUrl(carrierName, mblNo) {
+  const c = (carrierName || "").toUpperCase();
+  const num = encodeURIComponent(mblNo || "");
+  if (!num) return null;
+  if (c.includes("MAERSK")) return `https://www.maersk.com/tracking/${num}`;
+  if (c.includes("MSC") || c.includes("MEDITERRANEAN SHIPPING")) return `https://www.msc.com/en/track-a-shipment?agencyPath=msc&trackingNumber=${num}`;
+  if (c.includes("CMA") || c.includes("CGM")) return `https://www.cma-cgm.com/ebusiness/tracking/search?SearchBy=BL&Reference=${num}`;
+  if (c.includes("HAPAG")) return `https://www.hapag-lloyd.com/en/online-business/track/track-by-booking-solution.html?blno=${num}`;
+  if (c.includes("EVERGREEN")) return `https://ct.shipmentlink.com/servlet/TDB1_CargoTracking.do?TYPE=BL&NO=${num}`;
+  if (c.includes("COSCO")) return `https://elines.coscoshipping.com/ebusiness/cargotracking?trackingType=BILLOFLADING&number=${num}`;
+  if (c.includes("OOCL")) return `https://www.oocl.com/eng/ourservices/eservices/cargotracking/Pages/cargotracking.aspx?ctnrno=${num}`;
+  if (c.includes("ONE") || c.includes("OCEAN NETWORK")) return `https://ecomm.one-line.com/one-ecom/manage-shipment/cargo-tracking?bl=${num}`;
+  if (c.includes("YANG MING")) return `https://www.yangming.com/e-service/Track_Trace/track_trace_cargo_tracking.aspx?bl_no=${num}`;
+  if (c.includes("HMM") || c.includes("HYUNDAI")) return `https://www.hmm21.com/e-service/general/trackNTrace/TrackNTrace.do?blNo=${num}`;
+  if (c.includes("WAN HAI")) return `https://www.wanhai.com/views/cargoTrack/CargoTrack.xhtml`;
+  if (c.includes("KMTC") || c.includes("KOREA MARINE TRANSPORT")) return `https://www.ekmtc.com/index.html#/cargo-tracking?blNo=${num}`;
+  if (c.includes("SINKOR") || c.includes("SINOKOR")) return `https://www.sinokor.co.kr/eng/cargo/cargo_tracking.asp?bl_no=${num}`;
+  if (c.includes("EMIRATES SHIPPING")) return `https://www.emiratesline.com/eservice/CargoTracking.aspx?BOL=${num}`;
+  return `https://www.google.com/search?q=${encodeURIComponent((carrierName || "") + " tracking " + mblNo)}`;
+}
+
+function copyToClipboard(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(text).catch(() => fallbackCopy(text));
+  }
+  return fallbackCopy(text);
+}
+
+function fallbackCopy(text) {
+  return new Promise((resolve, reject) => {
+    try {
+      const el = document.createElement("textarea");
+      el.value = text;
+      el.style.position = "fixed";
+      el.style.opacity = "0";
+      document.body.appendChild(el);
+      el.focus();
+      el.select();
+      const ok = document.execCommand("copy");
+      document.body.removeChild(el);
+      ok ? resolve() : reject(new Error("execCommand copy failed"));
+    } catch (e) { reject(e); }
+  });
+}
+
+function TrackLink({ url, number }) {
+  const [state, setState] = useState("idle"); // idle | copied | failed
+  async function handleClick(e) {
+    e.preventDefault(); // copy first, THEN open the tab, so switching tabs can't cut the copy off mid-flight
+    try {
+      await copyToClipboard(number || "");
+      setState("copied");
+    } catch (err) {
+      setState("failed");
+    }
+    setTimeout(() => setState("idle"), 2000);
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
+  return (
+    <a href={url} onClick={handleClick} style={{ color: state === "copied" ? "#15803D" : state === "failed" ? "#B45309" : "#DC2626", display: "inline-flex", alignItems: "center", gap: 3, fontSize: 11, fontWeight: 600, textDecoration: "none", whiteSpace: "nowrap" }}>
+      {state === "copied" ? <><Check size={11} /> Copied — paste it</> : state === "failed" ? <><ExternalLink size={11} /> Couldn't copy, opening</> : <><ExternalLink size={11} /> Track</>}
+    </a>
+  );
 }
 
 function excelDateToISO(val) {
@@ -376,12 +447,6 @@ export default function ShipmentApp() {
 
   useEffect(() => { if (loaded && atRisk.length > 0 && !dismissedThisSession) setShowAlert(true); }, [loaded, atRisk.length, dismissedThisSession]);
 
-  // Note: the actual "DO not made" notifications (15-day heads-up + 5-10 day
-  // urgent tiers) are generated server-side by generate_do_reminders() on a
-  // daily pg_cron schedule (see schema-migration-v8.sql) — nothing to do here
-  // client-side except display them, which the Realtime subscription above
-  // already handles.
-
   // ---- mutations ----
   function toggleExpand(key) { setExpanded((p) => ({ ...p, [key]: !p[key] })); }
   function toggleTemplates(key) { setTemplatesOpen((p) => ({ ...p, [key]: !p[key] })); }
@@ -423,8 +488,10 @@ export default function ShipmentApp() {
 
   async function toggleAck(id) {
     const s = shipments.find((x) => x.id === id);
-    setShipments((p) => p.map((x) => (x.id === id ? { ...x, reminder_acknowledged: !x.reminder_acknowledged } : x)));
-    await supabase.from("shipments").update({ reminder_acknowledged: !s.reminder_acknowledged }).eq("id", id);
+    const nextAcked = !s.reminder_acknowledged;
+    const doMadeDate = nextAcked ? today : null;
+    setShipments((p) => p.map((x) => (x.id === id ? { ...x, reminder_acknowledged: nextAcked, do_made_date: doMadeDate } : x)));
+    await supabase.from("shipments").update({ reminder_acknowledged: nextAcked, do_made_date: doMadeDate }).eq("id", id);
   }
   async function toggleDelivered(id) {
     const s = shipments.find((x) => x.id === id);
@@ -479,6 +546,25 @@ export default function ShipmentApp() {
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, me.name);
     XLSX.writeFile(wb, `${me.name}-shipments-${today}.xlsx`);
+  }
+
+  function downloadDoMadeToday() {
+    const mine = shipments
+      .filter((s) => {
+        const c = customers[s.customer_id];
+        return c && (c.coordinators || []).includes(me.id) && s.reminder_acknowledged && s.do_made_date === today;
+      })
+      .map((s) => ({
+        "Customer": customers[s.customer_id]?.canonicalName || s.cnee_name_raw,
+        "Shipment No.": s.shipment_no, "HBL No.": s.hbl_no, "MBL No.": s.mbl_no,
+        "Arrival Date": s.arrival_date, "Carrier": s.carrier_name,
+        "DO Made Date": s.do_made_date, "Remark": s.remark,
+      }));
+    if (mine.length === 0) { setError("No DOs marked made today yet — nothing to download."); return; }
+    const ws = XLSX.utils.json_to_sheet(mine);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "DO Made Today");
+    XLSX.writeFile(wb, `${me.name}-DO-made-${today}.xlsx`);
   }
 
   const myAssignedCount = me ? Object.values(customers).filter((c) => (c.coordinators || []).includes(me.id)).length : 0;
@@ -538,6 +624,9 @@ export default function ShipmentApp() {
           )}
           <button className="btn" onClick={downloadMyShipments} style={{ display: "flex", alignItems: "center", gap: 6, background: "#fff", color: "#374151", padding: "9px 14px", borderRadius: 7, fontSize: 13, fontWeight: 600, border: "1px solid #E5E7EB" }}>
             <FileDown size={14} /> My shipments (.xlsx)
+          </button>
+          <button className="btn" onClick={downloadDoMadeToday} style={{ display: "flex", alignItems: "center", gap: 6, background: "#fff", color: "#374151", padding: "9px 14px", borderRadius: 7, fontSize: 13, fontWeight: 600, border: "1px solid #E5E7EB" }}>
+            <FileDown size={14} /> DO Made Today (.xlsx)
           </button>
           {isAdmin && (
             <>
@@ -713,7 +802,7 @@ function CustomerGroup({ group, expanded, templatesOpenState, onToggle, onToggle
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead>
                 <tr>
-                  {["HBL No.", "Shipment No.", "Onb. Date", "Arrival", "POL", "POD", "Vessel", "Shipper", "Carrier", "Incoterms", "Gross Weight", "CBM", "20FT", "40FT", "Cargo Type", "ETD", "ETA", "Status", "3P Letter", ""].map((h) => (
+                  {["HBL No.", "Shipment No.", "MBL No.", "Onb. Date", "Arrival", "Track", "POL", "POD", "Vessel", "Shipper", "Carrier", "Incoterms", "Gross Weight", "CBM", "20FT", "40FT", "Cargo Type", "ETD", "ETA", "Status", "3P Letter", ""].map((h) => (
                     <th key={h} style={{ textAlign: "left", fontSize: 10.5, color: "#9CA3AF", padding: "8px 12px", borderBottom: "1px solid #E5E7EB", whiteSpace: "nowrap" }}>{h}</th>
                   ))}
                 </tr>
@@ -722,12 +811,15 @@ function CustomerGroup({ group, expanded, templatesOpenState, onToggle, onToggle
                 {shipments.map((s) => {
                   const rd = s.raw_details || {};
                   const cellStyle = { padding: "9px 12px", fontSize: 12.5, borderBottom: "1px solid #F3F4F6" };
+                  const trackUrl = getTrackingUrl(s.carrier_name, s.mbl_no || s.shipment_no);
                   return (
                     <tr key={s.id}>
                       <td style={cellStyle}>{s.hbl_no || "—"}</td>
                       <td style={cellStyle}>{s.shipment_no}</td>
+                      <td style={cellStyle}>{s.mbl_no || "—"}</td>
                       <td style={cellStyle}>{s.on_board_date || "—"}</td>
                       <td style={cellStyle}>{s.arrival_date || "—"}</td>
+                      <td style={cellStyle}>{trackUrl ? <TrackLink url={trackUrl} number={s.mbl_no || s.shipment_no} /> : "—"}</td>
                       <td style={cellStyle}>{s.pol || "—"}</td>
                       <td style={cellStyle}>{s.pod || "—"}</td>
                       <td style={{ ...cellStyle, maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.vessel || "—"}</td>
@@ -841,4 +933,4 @@ function Modal({ children, onClose }) {
       </div>
     </div>
   );
-                            }
+    }
